@@ -124,7 +124,6 @@ OPL2/OPL3 は外部 ROM/RAM を持たないため、常に `FM_ERR_UNAVAILABLE` 
 
 ## ライセンス
 
-- `extern/dbopl/` : **GNU GPL v2** (DOSBox Team / rofl0r)
-- `src/` : MIT または任意のライセンスで配布可能ですが、  
-  dbopl を静的リンクして配布する場合はバイナリ全体が **GPL v2** の適用対象になります。  
-  動的リンク構成 (DLL/.so) にすることで、アプリケーション側のライセンスを分離できます。
+このプロジェクトは **GNU General Public License v2.0** のもとで公開されています。詳細は [LICENSE](LICENSE) を参照してください。
+
+`extern/dbopl/` は [rofl0r/dbopl](https://github.com/rofl0r/dbopl) を git submodule として参照しており、DOSBox Team により同じく GPL v2 で配布されています。
