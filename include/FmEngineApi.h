@@ -37,11 +37,36 @@ typedef enum FmResult {
 } FmResult;
 
 // ---- メモリ種別 ---------------------------------------------------------
+// チップから見えるメモリ。
+// OPNA と Y8950 の ADPCM-B は、ROM/RAM 選択ビットが ROM のときと RAM のときで
+// 別のメモリにアクセスする。選択ビットはメモリが書き込めるかどうかは表さない。
 typedef enum FmMemoryType {
-    FM_MEM_ADPCM_A = 1,  // ADPCM-A ROM (OPNA/OPNB/OPNBB)
-    FM_MEM_ADPCM_B = 2,  // ADPCM-B ROM/RAM (OPNA/OPNB/OPNBB/Y8950)
-    FM_MEM_PCM     = 3,  // PCM ROM (OPL4)
+    FM_MEM_ADPCM_A         = 1,  // ADPCM-A (OPNA: リズムの内蔵 ROM の内容 / OPNB/OPNBB)
+    FM_MEM_ADPCM_B         = 2,  // ADPCM-B (OPNA/OPNB/OPNBB/Y8950)。OPNA/Y8950 では RAM モードのメモリ
+    FM_MEM_PCM             = 3,  // PCM (OPL4)
+    FM_MEM_ADPCM_B_ROMMODE = 4,  // ADPCM-B の ROM モードのメモリ (OPNA/Y8950)。FmEngine_SetMemoryEx 専用
 } FmMemoryType;
+
+// ---- 外部メモリにつないだデバイスの種類 ---------------------------------
+typedef enum FmMemoryAccess {
+    FM_ACCESS_ROM = 0,  // 割り当て中は内容が変わらない。チップからの書き込みは捨てる
+    FM_ACCESS_RAM = 1,  // チップ以外も書き換えてよい。ブロックをその場で読み書きする
+} FmMemoryAccess;
+
+// ---- 出力の部位 ---------------------------------------------------------
+// チップが別々の端子から出す出力。番号はチップをまたいで重ならない。
+// 出力が1本のチップ (OPL/OPL2/Y8950/OPN2/OPM/OPZ) は部位を持たない。
+typedef enum FmPart {
+    FM_PART_OPN_FM      = 0,  // OPN/OPNA/OPNB/OPNBB: FM 部 (ADPCM・リズムを含む)
+    FM_PART_OPN_SSG     = 1,  //   SSG 部
+    FM_PART_OPLL_MELODY = 2,  // OPLL/OPLLP/OPLLX/VRC7: メロディ
+    FM_PART_OPLL_RHYTHM = 3,  //   リズム
+    FM_PART_OPL3_AB     = 4,  // OPL3: 出力 A (L) / B (R)
+    FM_PART_OPL3_CD     = 5,  //   出力 C (L) / D (R)。既定のゲインは 0
+    FM_PART_OPL4_DO0    = 6,  // OPL4: DO0 (FM の C/D)。既定のゲインは 0
+    FM_PART_OPL4_DO1    = 7,  //   DO1 (AWM の C/D)。既定のゲインは 0
+    FM_PART_OPL4_DO2    = 8,  //   DO2 (FM の A/B と AWM の A/B のミックス)
+} FmPart;
 
 // ---- 不透明ハンドル -----------------------------------------------------
 struct FmEngineOpaque;
@@ -82,6 +107,8 @@ FMENGINE_API FmResult FMENGINE_CALL FmEngine_AddChip(
 // =========================================================
 FMENGINE_API const char* FMENGINE_CALL FmEngine_GetChipName(
     FmEngineHandle engine, uint32_t chip_id);
+// FM 部のネイティブサンプルレート (Hz、端数切り捨て)。
+// OPN/OPNA では prescale レジスタ (0x2D-0x2F) の書き込みで変わる。
 FMENGINE_API uint32_t    FMENGINE_CALL FmEngine_GetNativeRate(
     FmEngineHandle engine, uint32_t chip_id);
 FMENGINE_API uint32_t    FMENGINE_CALL FmEngine_GetSampleRate(
@@ -106,15 +133,62 @@ FMENGINE_API FmResult FMENGINE_CALL FmEngine_GetGain(
     float* out_gain_l, float* out_gain_r);
 
 // =========================================================
-//  外部メモリ設定 (ADPCM/PCM ROM/RAM)
-//  data の寿命は呼び出し元が管理すること。
+//  部位ごとのゲイン設定 (L/R 独立)
+//  実際に掛かるゲインは FmEngine_SetGain のゲイン × 部位のゲイン。
+//  既定値は 1.0 (FM_PART_OPL3_CD / FM_PART_OPL4_DO0 / FM_PART_OPL4_DO1 は 0)。
+//  チップが持たない部位を指定すると FM_ERR_INVALID_ARG。
+//  オーディオコールバックスレッドと並行して呼び出し可能。
+// =========================================================
+FMENGINE_API FmResult FMENGINE_CALL FmEngine_SetPartGain(
+    FmEngineHandle engine, uint32_t chip_id, FmPart part,
+    float gain_l, float gain_r);
+FMENGINE_API FmResult FMENGINE_CALL FmEngine_GetPartGain(
+    FmEngineHandle engine, uint32_t chip_id, FmPart part,
+    float* out_gain_l, float* out_gain_r);
+// チップが持つ部位をビットマスクで返す (bit n = FmPart の n 番)。
+// 部位を持たないチップは 0。未知の chip_id なら FM_ERR_INVALID_ARG。
+FMENGINE_API FmResult FMENGINE_CALL FmEngine_GetPartMask(
+    FmEngineHandle engine, uint32_t chip_id, uint32_t* out_mask);
+
+// =========================================================
+//  外部メモリ設定
+//  data は複製せず参照する。割り当てを外すか FmEngine_Destroy が戻るまで
+//  解放しないこと。
 //  オーディオストリーム開始前に呼ぶこと (スレッドセーフではない)。
+//
+//  FmEngine_SetMemory: mem_type のメモリを [0, size) の data だけにする
+//  (それまでの割り当ては外す)。チップからの書き込みは捨てる。
+//  FM_MEM_ADPCM_B_ROMMODE は FM_ERR_INVALID_ARG (FmEngine_SetMemoryEx を使う)。
+//
+//  FmEngine_GetMemorySize: 割り当てたブロックの大きさの合計 (バイト)。
 // =========================================================
 FMENGINE_API FmResult  FMENGINE_CALL FmEngine_SetMemory(
     FmEngineHandle engine, uint32_t chip_id,
     FmMemoryType mem_type, const uint8_t* data, uint32_t size);
 FMENGINE_API uint32_t  FMENGINE_CALL FmEngine_GetMemorySize(
     FmEngineHandle engine, uint32_t chip_id, FmMemoryType mem_type);
+
+// =========================================================
+//  外部メモリの割り当て (ROM/RAM を区別する)
+//  mem_type のメモリの [base, base + size) に data を割り当てる。
+//  番地 base + i のバイトが data[i]。割り当ての無い番地を読むと 0、
+//  書き込みは捨てる。data == nullptr なら、その範囲と重なる割り当てを
+//  すべて外す (access は無視)。
+//  未知の chip_id、チップが持たない mem_type、size が 0、base + size が 2^32 を
+//  越える、既存の割り当てと範囲が重なる、未知の access なら FM_ERR_INVALID_ARG。
+//
+//  ブロックは複製しない。FM_ACCESS_RAM のブロックにはチップの書き込みを
+//  その場で入れる。エンジンがブロックを読み書きするのは FmEngine_Generate の
+//  実行中だけ。FmEngine_Write でチップがメモリに書いた値は、その書き込みを
+//  反映した FmEngine_Generate が戻った時点でブロックに入っている
+//  (書き込みは次の FmEngine_Generate で反映する。KEY ON/OFF の衝突で反映を
+//  保留している間は、さらに後の呼び出しに持ち越す)。
+//  オーディオストリーム開始前に呼ぶこと (スレッドセーフではない)。
+// =========================================================
+FMENGINE_API FmResult FMENGINE_CALL FmEngine_SetMemoryEx(
+    FmEngineHandle engine, uint32_t chip_id,
+    FmMemoryType mem_type, uint32_t base,
+    uint8_t* data, uint32_t size, FmMemoryAccess access);
 
 // =========================================================
 //  波形生成

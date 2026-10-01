@@ -100,6 +100,25 @@ find_package(Threads REQUIRED)
 target_link_libraries(DBOPLEngine PRIVATE Threads::Threads)
 
 # ===========================================================================
+# テスト (任意)
+# api_test は FMEngineTest と同じく DLL を実行時にロードして
+# エクスポートされた関数だけを叩く。
+# ctest -C Release で走らせる。
+# ===========================================================================
+option(DBOPL_BUILD_TESTS "Build the API test" ON)
+if(DBOPL_BUILD_TESTS)
+    enable_testing()
+    add_executable(api_test tests/api_test.cpp)
+    target_include_directories(api_test PRIVATE include)
+    target_link_libraries(api_test PRIVATE ${CMAKE_DL_LIBS})
+    if(MSVC)
+        target_compile_options(api_test PRIVATE /W3 /utf-8)
+    endif()
+    add_dependencies(api_test DBOPLEngine)
+    add_test(NAME api_test COMMAND api_test $<TARGET_FILE:DBOPLEngine>)
+endif()
+
+# ===========================================================================
 # インストールルール
 # ===========================================================================
 install(TARGETS DBOPLEngine
