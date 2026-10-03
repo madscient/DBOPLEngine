@@ -16,14 +16,15 @@
 
 - **`extern/dbopl` (submodule) は改造しない。** dbopl に無い機能はエンジン側で組む
   （OPL3 の出力 C/D がその例。`doc/plan.md` §2.2）
-- **`include/FmEngineApi.h` は YMEngine の `src/FmEngineApi.h` の写し。** 中身を直接
+- **`include/FmEngineApi.h` は FMEngineTest の `include/FmEngineApi.h` の写し。** 中身を直接
   直さない。API の仕様の正は FMEngineTest の `docs/FmEngineApi.md`。改訂されたら
-  両方を見て写し直し、エンジンを追随させる。ヘッダのコメントには写し元のエンジン
-  固有の記述が混ざるので、DBOPLEngine 固有の振る舞いは `README.md` の「API メモ」に書く
+  両方を見て写し直し、エンジンを追随させる。エンジンごとの追随点は FMEngineTest の
+  `docs/CHANGELOG.md` にある。ヘッダは特定のエンジンに依らない書き方なので、
+  DBOPLEngine 固有の振る舞いは `README.md` の「API メモ」に書く
 - **公開リポジトリである。** ローカルのパスや個人の情報を成果物・コミットメッセージに
   書かない。他のリポジトリは GitHub 上の名前とコミットで指す
 - **外から見える値は決める前にユーザーに聞く。** チップ名、対応チップの並び、
-  `reg` / `port` の意味、部位マスク、出力レベル、`FmEngine_SetMemory` の意味など
+  `reg` / `port` の意味、部位の名前、出力レベル、外部メモリの名前など
 - **変更したら `api_test` を回す**（手順は `README.md` の「試験」）。
   試験を足したら、壊した版で落ちることを示してから通ったことを証拠に数える
 - 文書と、`src/`・`tests/` のコメントは日本語で書く

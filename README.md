@@ -23,7 +23,7 @@ DBOPLEngine/
 ├── CMakeLists.txt
 ├── README.md
 ├── include/
-│   └── FmEngineApi.h        ← FmEngineApi ファサードヘッダ (各エンジン共通)
+│   └── FmEngineApi.h        ← FmEngineApi のヘッダ (FMEngineTest の include/FmEngineApi.h の写し)
 ├── extern/
 │   └── dbopl/               ← git submodule: https://github.com/rofl0r/dbopl
 │       ├── dbopl.h
@@ -140,22 +140,29 @@ OPL3 モード (reg 0x105 bit0 = NEW) が 0 の間、port=1 への書き込み�
 
 ### 部位ごとのゲイン
 
-任意シンボル `FmEngine_SetPartGain` / `FmEngine_GetPartGain` / `FmEngine_GetPartMask` をエクスポートします。
+任意シンボル `FmEngine_GetPartCount` / `FmEngine_GetPartName` / `FmEngine_SetPartGain` / `FmEngine_GetPartGain` をエクスポートします。  
+部位は名前の文字列で指定します (大文字小文字を区別する)。
 
-| チップ | 部位 | 内容 | 既定値 |
-|--------|------|------|--------|
+| チップ | 部位の名前 | 内容 | 既定値 |
+|--------|------------|------|--------|
 | OPL, OPL2 | なし | ゲインは `FmEngine_SetGain` で設定 | — |
-| OPL3 | `FM_PART_OPL3_AB` | 出力 A (L) / B (R) | 1.0 |
-| OPL3 | `FM_PART_OPL3_CD` | 出力 C (L) / D (R) | 0 |
+| OPL3 | `AB` | 出力 A (L) / B (R) | 1.0 |
+| OPL3 | `CD` | 出力 C (L) / D (R) | 0 |
 
+```c
+// 出力 C/D も混ぜる
+FmEngine_SetPartGain(engine, chip_id, "CD", 1.0f, 1.0f);
+```
+
+- `FmEngine_GetPartCount` は OPL / OPL2 で 0、OPL3 で 2 を返します。
 - 各チャンネルの出力先は reg 0xC0–0xC8 (両バンク) の bit4–7 (A, B, C, D) で選びます。NEW=1 の間、bit4–7 がすべて 0 のチャンネルはどの出力にも出ません (リズム音を除く)。
 - NEW=0 の間は、出力先のビットに関係なく A/B に同じ音 (モノラル) を出し、C/D には何も出しません。
-- リズム音 (reg 0xBD bit5) は、出力先のビットに関係なく A/B に出ます。`FM_PART_OPL3_CD` のゲインが 0 でなければ C/D にも出ます。
+- リズム音 (reg 0xBD bit5) は、出力先のビットに関係なく A/B に出ます。`CD` のゲインが 0 でなければ C/D にも出ます。
 
-### FmEngine_SetMemory
+### 外部メモリ
 
-OPL/OPL2/OPL3 は外部 ROM/RAM を持たないため、`FmEngine_SetMemory` は常に `FM_ERR_UNAVAILABLE`、`FmEngine_GetMemorySize` は常に 0 を返します。  
-任意シンボル `FmEngine_SetMemoryEx` はエクスポートしません。
+OPL / OPL2 / OPL3 は外部メモリを持たないため、外部メモリの任意シンボル (`FmEngine_GetMemoryCount` / `FmEngine_GetMemoryName` / `FmEngine_SetMemory` / `FmEngine_SetMemoryEx`) はどれもエクスポートしません。  
+呼び出し側は `FmEngine_GetMemoryCount` の有無を確かめ、無いときは外部メモリの関数を呼ばないでください。
 
 ### OPL3 の有効化
 

@@ -51,20 +51,24 @@ static constexpr float    DBOPL_SCALE = 1.0f / 32768.0f;
 // ---------------------------------------------------------------------------
 // 部位
 // ---------------------------------------------------------------------------
-static constexpr uint32_t kPartCount = FM_PART_OPL4_DO2 + 1;
-static constexpr uint32_t kOpl3Parts =
-    (1u << FM_PART_OPL3_AB) | (1u << FM_PART_OPL3_CD);
-static_assert(kPartCount <= 32, "part mask is uint32_t");
+struct PartDef {
+    const char* name;
+    float       default_gain;
+};
+
+// OPL3 の部位。並びは FmEngine_GetPartName の index と ChipEntry::part_gain の添字を兼ねる
+enum : uint32_t { kOpl3PartAB, kOpl3PartCD, kOpl3PartCount };
+static const PartDef kOpl3Parts[kOpl3PartCount] = {
+    { "AB", 1.0f },
+    { "CD", 0.0f },
+};
+
+static constexpr uint32_t kMaxPartCount = kOpl3PartCount;
 
 struct PartGain {
     float l;
     float r;
 };
-
-static PartGain DefaultPartGain(uint32_t part) {
-    const float g = (part == FM_PART_OPL3_CD) ? 0.0f : 1.0f;
-    return { g, g };
-}
 
 // ---------------------------------------------------------------------------
 // チップ種別
@@ -80,10 +84,11 @@ struct ChipEntry {
     // 同じ Generate を受けた2つは C0 の出力先ビット以外で同じ状態を保つ。
     std::unique_ptr<DBOPL::Handler> handler_cd;
     std::string     name;
-    uint32_t        part_mask = 0;
+    const PartDef*  parts = nullptr;
+    uint32_t        part_count = 0;
     float           gain_l = 1.0f;
     float           gain_r = 1.0f;
-    PartGain        part_gain[kPartCount];
+    PartGain        part_gain[kMaxPartCount] = {};
 };
 
 // ---------------------------------------------------------------------------
@@ -101,16 +106,17 @@ struct FmEngineOpaque {
 // 対応チップ定義
 // ---------------------------------------------------------------------------
 struct SupportedChipDef {
-    const char* name;
-    ChipType    type;
-    uint32_t    dbopl_clock;    // dbopl のテーブルが前提にしているクロック
-    uint32_t    part_mask;
+    const char*    name;
+    ChipType       type;
+    uint32_t       dbopl_clock;    // dbopl のテーブルが前提にしているクロック
+    const PartDef* parts;
+    uint32_t       part_count;
 };
 
 static const SupportedChipDef kSupportedChips[] = {
-    { "OPL",  ChipType::OPL,  DBOPL_OPL_CLOCK,  0          },
-    { "OPL2", ChipType::OPL2, DBOPL_OPL_CLOCK,  0          },
-    { "OPL3", ChipType::OPL3, DBOPL_OPL3_CLOCK, kOpl3Parts },
+    { "OPL",  ChipType::OPL,  DBOPL_OPL_CLOCK,  nullptr,    0              },
+    { "OPL2", ChipType::OPL2, DBOPL_OPL_CLOCK,  nullptr,    0              },
+    { "OPL3", ChipType::OPL3, DBOPL_OPL3_CLOCK, kOpl3Parts, kOpl3PartCount },
 };
 static constexpr uint32_t kSupportedChipCount =
     (uint32_t)(sizeof(kSupportedChips) / sizeof(kSupportedChips[0]));
@@ -143,9 +149,14 @@ static uint32_t DboplRate(uint32_t sample_rate, uint32_t clock, uint32_t dbopl_c
     return (r == 0 || r > 0xFFFFFFFFu) ? 0 : (uint32_t)r;
 }
 
-static bool HasPart(const ChipEntry& entry, FmPart part) {
-    const uint32_t p = (uint32_t)part;
-    return p < kPartCount && (entry.part_mask & (1u << p)) != 0;
+// 部位の名前から part_gain の添字を引く。チップが持たない名前と nullptr は -1
+static int FindPart(const ChipEntry& entry, const char* part) {
+    if (!part) return -1;
+    for (uint32_t i = 0; i < entry.part_count; ++i) {
+        if (strcmp(entry.parts[i].name, part) == 0)
+            return (int)i;
+    }
+    return -1;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,9 +233,10 @@ FmEngine_AddChip(FmEngineHandle engine, const char* name,
         ChipEntry& entry = engine->chips.back();
         entry.type = def->type;
         entry.name = def->name;
-        entry.part_mask = def->part_mask;
-        for (uint32_t p = 0; p < kPartCount; ++p)
-            entry.part_gain[p] = DefaultPartGain(p);
+        entry.parts = def->parts;
+        entry.part_count = def->part_count;
+        for (uint32_t p = 0; p < def->part_count; ++p)
+            entry.part_gain[p] = { def->parts[p].default_gain, def->parts[p].default_gain };
 
         entry.handler.Init(dbopl_rate);
 
@@ -315,58 +327,53 @@ FmEngine_GetGain(FmEngineHandle engine, uint32_t chip_id,
 }
 
 // ---------------------------------------------------------------------------
-// FmEngine_SetPartGain / FmEngine_GetPartGain / FmEngine_GetPartMask
+// FmEngine_GetPartCount / FmEngine_GetPartName
+// FmEngine_SetPartGain / FmEngine_GetPartGain
 // ---------------------------------------------------------------------------
+FMENGINE_API uint32_t FMENGINE_CALL
+FmEngine_GetPartCount(FmEngineHandle engine, uint32_t chip_id) {
+    if (!ValidChipId(engine, chip_id)) return 0;
+    return engine->chips[chip_id].part_count;
+}
+
+FMENGINE_API const char* FMENGINE_CALL
+FmEngine_GetPartName(FmEngineHandle engine, uint32_t chip_id, uint32_t index) {
+    if (!ValidChipId(engine, chip_id)) return nullptr;
+    const ChipEntry& entry = engine->chips[chip_id];
+    if (index >= entry.part_count) return nullptr;
+    return entry.parts[index].name;
+}
+
 FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_SetPartGain(FmEngineHandle engine, uint32_t chip_id, FmPart part,
+FmEngine_SetPartGain(FmEngineHandle engine, uint32_t chip_id, const char* part,
                      float gain_l, float gain_r) {
     if (!ValidChipId(engine, chip_id)) return FM_ERR_INVALID_ARG;
     ChipEntry& entry = engine->chips[chip_id];
-    if (!HasPart(entry, part)) return FM_ERR_INVALID_ARG;
+    const int index = FindPart(entry, part);
+    if (index < 0) return FM_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> lock(engine->write_mutex);
-    entry.part_gain[part] = { gain_l, gain_r };
+    entry.part_gain[index] = { gain_l, gain_r };
     return FM_OK;
 }
 
 FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_GetPartGain(FmEngineHandle engine, uint32_t chip_id, FmPart part,
+FmEngine_GetPartGain(FmEngineHandle engine, uint32_t chip_id, const char* part,
                      float* out_gain_l, float* out_gain_r) {
     if (!ValidChipId(engine, chip_id)) return FM_ERR_INVALID_ARG;
     if (!out_gain_l || !out_gain_r) return FM_ERR_INVALID_ARG;
     const ChipEntry& entry = engine->chips[chip_id];
-    if (!HasPart(entry, part)) return FM_ERR_INVALID_ARG;
+    const int index = FindPart(entry, part);
+    if (index < 0) return FM_ERR_INVALID_ARG;
     std::lock_guard<std::mutex> lock(engine->write_mutex);
-    *out_gain_l = entry.part_gain[part].l;
-    *out_gain_r = entry.part_gain[part].r;
+    *out_gain_l = entry.part_gain[index].l;
+    *out_gain_r = entry.part_gain[index].r;
     return FM_OK;
 }
 
-FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_GetPartMask(FmEngineHandle engine, uint32_t chip_id, uint32_t* out_mask) {
-    if (!ValidChipId(engine, chip_id)) return FM_ERR_INVALID_ARG;
-    if (!out_mask) return FM_ERR_INVALID_ARG;
-    *out_mask = engine->chips[chip_id].part_mask;
-    return FM_OK;
-}
-
-// ---------------------------------------------------------------------------
-// FmEngine_SetMemory / FmEngine_GetMemorySize
-// dbopl は ADPCM/PCM メモリを持たない (OPL2/OPL3 はPCMなし)
-// ---------------------------------------------------------------------------
-FMENGINE_API FmResult FMENGINE_CALL
-FmEngine_SetMemory(FmEngineHandle engine, uint32_t chip_id,
-                   FmMemoryType /*mem_type*/,
-                   const uint8_t* /*data*/, uint32_t /*size*/) {
-    if (!ValidChipId(engine, chip_id)) return FM_ERR_INVALID_ARG;
-    return FM_ERR_UNAVAILABLE;   // OPL2/OPL3 は外部メモリ不要
-}
-
-FMENGINE_API uint32_t FMENGINE_CALL
-FmEngine_GetMemorySize(FmEngineHandle engine, uint32_t chip_id,
-                       FmMemoryType /*mem_type*/) {
-    if (!ValidChipId(engine, chip_id)) return 0;
-    return 0;
-}
+// 外部メモリの関数 (FmEngine_GetMemoryCount / FmEngine_GetMemoryName /
+// FmEngine_SetMemory / FmEngine_SetMemoryEx) は定義しない。OPL / OPL2 / OPL3 は
+// 外部メモリを持たず、呼び出し側は FmEngine_GetMemoryCount の無い DLL を
+// 外部メモリを持たないエンジンとして扱う。
 
 // ---------------------------------------------------------------------------
 // FmEngine_Generate
@@ -407,14 +414,14 @@ FmEngine_Generate(FmEngineHandle engine,
         float ar = DBOPL_SCALE * entry.gain_r;
         float cl = 0.0f;
         float cr = 0.0f;
-        if (entry.part_mask & (1u << FM_PART_OPL3_AB)) {
-            al *= entry.part_gain[FM_PART_OPL3_AB].l;
-            ar *= entry.part_gain[FM_PART_OPL3_AB].r;
+        if (entry.parts == kOpl3Parts) {
+            al *= entry.part_gain[kOpl3PartAB].l;
+            ar *= entry.part_gain[kOpl3PartAB].r;
         }
         // ymfm (YMEngine) と同じく、NEW=0 の間は C/D に何も出さない
         if (is_opl3 && entry.handler_cd) {
-            cl = DBOPL_SCALE * entry.gain_l * entry.part_gain[FM_PART_OPL3_CD].l;
-            cr = DBOPL_SCALE * entry.gain_r * entry.part_gain[FM_PART_OPL3_CD].r;
+            cl = DBOPL_SCALE * entry.gain_l * entry.part_gain[kOpl3PartCD].l;
+            cr = DBOPL_SCALE * entry.gain_r * entry.part_gain[kOpl3PartCD].r;
         }
 
         if (is_opl3) {

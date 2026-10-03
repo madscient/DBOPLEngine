@@ -38,15 +38,14 @@ struct Api {
     FmResult    (FMENGINE_CALL *Write)(FmEngineHandle, uint32_t, uint8_t, uint8_t, uint32_t);
     FmResult    (FMENGINE_CALL *SetGain)(FmEngineHandle, uint32_t, float, float);
     FmResult    (FMENGINE_CALL *GetGain)(FmEngineHandle, uint32_t, float*, float*);
-    FmResult    (FMENGINE_CALL *SetPartGain)(FmEngineHandle, uint32_t, FmPart, float, float);
-    FmResult    (FMENGINE_CALL *GetPartGain)(FmEngineHandle, uint32_t, FmPart, float*, float*);
-    FmResult    (FMENGINE_CALL *GetPartMask)(FmEngineHandle, uint32_t, uint32_t*);
-    FmResult    (FMENGINE_CALL *SetMemory)(FmEngineHandle, uint32_t, FmMemoryType, const uint8_t*, uint32_t);
-    FmResult    (FMENGINE_CALL *SetMemoryEx)(FmEngineHandle, uint32_t, FmMemoryType, uint32_t,
-                                             uint8_t*, uint32_t, FmMemoryAccess);
-    uint32_t    (FMENGINE_CALL *GetMemorySize)(FmEngineHandle, uint32_t, FmMemoryType);
+    uint32_t    (FMENGINE_CALL *GetPartCount)(FmEngineHandle, uint32_t);
+    const char* (FMENGINE_CALL *GetPartName)(FmEngineHandle, uint32_t, uint32_t);
+    FmResult    (FMENGINE_CALL *SetPartGain)(FmEngineHandle, uint32_t, const char*, float, float);
+    FmResult    (FMENGINE_CALL *GetPartGain)(FmEngineHandle, uint32_t, const char*, float*, float*);
     FmResult    (FMENGINE_CALL *Generate)(FmEngineHandle, float*, float*, uint32_t);
 };
+
+void* g_lib = nullptr;
 
 void* openLibrary(const char* path) {
 #ifdef _WIN32
@@ -66,14 +65,14 @@ void* findSymbol(void* lib, const char* name) {
 
 // 必須シンボルが欠けていれば false。任意シンボルは欠けていれば nullptr のまま
 bool loadApi(const char* path, Api& api) {
-    void* lib = openLibrary(path);
-    if (!lib) {
+    g_lib = openLibrary(path);
+    if (!g_lib) {
         std::printf("cannot load %s\n", path);
         return false;
     }
     bool ok = true;
     auto bind = [&](auto& fn, const char* name, bool required) {
-        void* p = findSymbol(lib, name);
+        void* p = findSymbol(g_lib, name);
         if (!p && required) { std::printf("missing export: %s\n", name); ok = false; }
         std::memcpy(&fn, &p, sizeof(p));
     };
@@ -88,12 +87,10 @@ bool loadApi(const char* path, Api& api) {
     bind(api.Write,            "FmEngine_Write",            true);
     bind(api.SetGain,          "FmEngine_SetGain",          true);
     bind(api.GetGain,          "FmEngine_GetGain",          true);
+    bind(api.GetPartCount,     "FmEngine_GetPartCount",     false);
+    bind(api.GetPartName,      "FmEngine_GetPartName",      false);
     bind(api.SetPartGain,      "FmEngine_SetPartGain",      false);
     bind(api.GetPartGain,      "FmEngine_GetPartGain",      false);
-    bind(api.GetPartMask,      "FmEngine_GetPartMask",      false);
-    bind(api.SetMemory,        "FmEngine_SetMemory",        true);
-    bind(api.SetMemoryEx,      "FmEngine_SetMemoryEx",      false);
-    bind(api.GetMemorySize,    "FmEngine_GetMemorySize",    true);
     bind(api.Generate,         "FmEngine_Generate",         true);
     return ok;
 }
@@ -106,8 +103,12 @@ void check(const std::string& what, bool ok) {
     if (!ok) ++g_fails;
 }
 
+bool exported(const char* name) { return findSymbol(g_lib, name) != nullptr; }
+
+// FmEngine_GetPartCount の無い DLL の FmEngine_SetPartGain / FmEngine_GetPartGain は
+// 第 3 引数が文字列とは限らないので、4 つが揃っていなければどれも呼ばない
 bool hasPartApi() {
-    return A.SetPartGain && A.GetPartGain && A.GetPartMask;
+    return A.GetPartCount && A.GetPartName && A.SetPartGain && A.GetPartGain;
 }
 
 // ---------------------------------------------------------
@@ -262,10 +263,17 @@ Out opl3Note(uint8_t c0, const std::function<void(Engine&, uint32_t)>& gains = {
 //  試験
 // ---------------------------------------------------------
 void testExports() {
-    check("exports the part gain API (SetPartGain / GetPartGain / GetPartMask)",
+    check("exports the part gain API (GetPartCount / GetPartName / SetPartGain / GetPartGain)",
           hasPartApi());
-    check("does not export FmEngine_SetMemoryEx (no chip has external memory)",
-          A.SetMemoryEx == nullptr);
+    // FmEngine_GetMemoryCount を持たずに FmEngine_SetMemory / FmEngine_SetMemoryEx を
+    // エクスポートする DLL は、仕様と互換性の無いものとして扱われる
+    bool noMemory = true;
+    for (const char* n : { "FmEngine_GetMemoryCount", "FmEngine_GetMemoryName",
+                           "FmEngine_SetMemory", "FmEngine_SetMemoryEx" })
+        noMemory = noMemory && !exported(n);
+    check("exports none of the external memory API (no chip has external memory)", noMemory);
+    check("exports no FmEngine_GetPartMask / FmEngine_GetMemorySize (not part of the API)",
+          !exported("FmEngine_GetPartMask") && !exported("FmEngine_GetMemorySize"));
 }
 
 void testChipList() {
@@ -357,15 +365,6 @@ void testPort() {
           A.Write(e.h, opl3, 0x20, 0x01, 2) == FM_ERR_INVALID_ARG);
 }
 
-void testMemory() {
-    Engine e;
-    uint32_t opl3 = e.add("OPL3");
-    uint8_t data[16] = {};
-    check("SetMemory is unavailable",
-          A.SetMemory(e.h, opl3, FM_MEM_PCM, data, sizeof(data)) == FM_ERR_UNAVAILABLE &&
-          A.GetMemorySize(e.h, opl3, FM_MEM_PCM) == 0);
-}
-
 void testOpl2() {
     Out o = play("OPL2", [](Engine& e, uint32_t id) { e.write(id, note(0, 0x00)); });
     check("OPL2: a note is audible and identical on L and R", audible(o.l) && o.l == o.r);
@@ -420,32 +419,60 @@ void testPartApi() {
     uint32_t opl  = e.add("OPL");
     uint32_t opl2 = e.add("OPL2");
     uint32_t opl3 = e.add("OPL3");
-    const uint32_t opl3Parts = (1u << FM_PART_OPL3_AB) | (1u << FM_PART_OPL3_CD);
 
-    uint32_t m1 = 1, m2 = 1, m3 = 0;
-    check("GetPartMask: OPL and OPL2 have no part, OPL3 has AB and CD",
-          A.GetPartMask(e.h, opl, &m1) == FM_OK && m1 == 0 &&
-          A.GetPartMask(e.h, opl2, &m2) == FM_OK && m2 == 0 &&
-          A.GetPartMask(e.h, opl3, &m3) == FM_OK && m3 == opl3Parts);
-    check("GetPartMask rejects an unknown chip_id and a null pointer",
-          A.GetPartMask(e.h, 1000, &m1) == FM_ERR_INVALID_ARG &&
-          A.GetPartMask(e.h, opl3, nullptr) == FM_ERR_INVALID_ARG);
+    check("GetPartCount: OPL and OPL2 have no part, OPL3 has 2, an unknown chip_id has 0",
+          A.GetPartCount(e.h, opl) == 0 && A.GetPartCount(e.h, opl2) == 0 &&
+          A.GetPartCount(e.h, opl3) == 2 && A.GetPartCount(e.h, 1000) == 0);
+
+    // index の順序は仕様が定めないので、名前の組で見る
+    auto is = [](const char* s, const char* t) { return s && std::strcmp(s, t) == 0; };
+    const char* n0 = A.GetPartName(e.h, opl3, 0);
+    const char* n1 = A.GetPartName(e.h, opl3, 1);
+    check("GetPartName: the parts of OPL3 are AB and CD",
+          (is(n0, "AB") && is(n1, "CD")) || (is(n0, "CD") && is(n1, "AB")));
+    check("GetPartName returns the same name for the same index",
+          n0 && n1 && is(A.GetPartName(e.h, opl3, 0), n0) && is(A.GetPartName(e.h, opl3, 1), n1));
+    check("GetPartName returns null out of range and for an unknown chip_id",
+          A.GetPartName(e.h, opl3, 2) == nullptr && A.GetPartName(e.h, opl2, 0) == nullptr &&
+          A.GetPartName(e.h, 1000, 0) == nullptr);
 
     float l = -1.0f, r = -1.0f;
-    bool ab = A.GetPartGain(e.h, opl3, FM_PART_OPL3_AB, &l, &r) == FM_OK && l == 1.0f && r == 1.0f;
-    bool cd = A.GetPartGain(e.h, opl3, FM_PART_OPL3_CD, &l, &r) == FM_OK && l == 0.0f && r == 0.0f;
-    check("OPL3 part gains default to AB = 1.0, CD = 0", ab && cd);
+    auto gainIs = [&](const char* part, float gl, float gr) {
+        l = r = -1.0f;
+        return A.GetPartGain(e.h, opl3, part, &l, &r) == FM_OK && l == gl && r == gr;
+    };
+    auto defaults = [&] { return gainIs("AB", 1.0f, 1.0f) && gainIs("CD", 0.0f, 0.0f); };
+    check("OPL3 part gains default to AB = 1.0, CD = 0", defaults());
+    check("GetPartGain accepts the names GetPartName returned",
+          n0 && n1 && A.GetPartGain(e.h, opl3, n0, &l, &r) == FM_OK &&
+          A.GetPartGain(e.h, opl3, n1, &l, &r) == FM_OK);
 
     check("SetPartGain / GetPartGain reject a part the chip does not have",
-          A.SetPartGain(e.h, opl2, FM_PART_OPL3_AB, 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
-          A.SetPartGain(e.h, opl3, FM_PART_OPN_FM, 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
-          A.SetPartGain(e.h, opl3, (FmPart)40, 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
-          A.SetPartGain(e.h, opl3, (FmPart)-1, 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
-          A.GetPartGain(e.h, opl, FM_PART_OPL3_CD, &l, &r) == FM_ERR_INVALID_ARG &&
-          A.SetPartGain(e.h, 1000, FM_PART_OPL3_AB, 0.5f, 0.5f) == FM_ERR_INVALID_ARG);
+          A.SetPartGain(e.h, opl2, "AB", 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
+          A.SetPartGain(e.h, opl3, "FM", 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
+          A.GetPartGain(e.h, opl, "CD", &l, &r) == FM_ERR_INVALID_ARG &&
+          A.GetPartGain(e.h, opl3, "SSG", &l, &r) == FM_ERR_INVALID_ARG &&
+          A.SetPartGain(e.h, 1000, "AB", 0.5f, 0.5f) == FM_ERR_INVALID_ARG);
+    check("part names are case-sensitive and matched as a whole",
+          A.SetPartGain(e.h, opl3, "ab", 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
+          A.SetPartGain(e.h, opl3, "Cd", 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
+          A.SetPartGain(e.h, opl3, "A", 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
+          A.SetPartGain(e.h, opl3, "ABC", 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
+          A.SetPartGain(e.h, opl3, "CD ", 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
+          A.SetPartGain(e.h, opl3, "", 0.5f, 0.5f) == FM_ERR_INVALID_ARG);
+    check("SetPartGain / GetPartGain reject a null part name and null output pointers",
+          A.SetPartGain(e.h, opl3, nullptr, 0.5f, 0.5f) == FM_ERR_INVALID_ARG &&
+          A.GetPartGain(e.h, opl3, nullptr, &l, &r) == FM_ERR_INVALID_ARG &&
+          A.GetPartGain(e.h, opl3, "AB", nullptr, &r) == FM_ERR_INVALID_ARG &&
+          A.GetPartGain(e.h, opl3, "AB", &l, nullptr) == FM_ERR_INVALID_ARG);
+    check("a rejected SetPartGain leaves the gains unchanged", defaults());
+
     check("SetPartGain then GetPartGain returns the values",
-          A.SetPartGain(e.h, opl3, FM_PART_OPL3_CD, 0.25f, 0.75f) == FM_OK &&
-          A.GetPartGain(e.h, opl3, FM_PART_OPL3_CD, &l, &r) == FM_OK && l == 0.25f && r == 0.75f);
+          A.SetPartGain(e.h, opl3, "CD", 0.25f, 0.75f) == FM_OK && gainIs("CD", 0.25f, 0.75f));
+    check("SetPartGain on one part leaves the other part unchanged",
+          gainIs("AB", 1.0f, 1.0f) &&
+          A.SetPartGain(e.h, opl3, "AB", 0.5f, 2.0f) == FM_OK &&
+          gainIs("AB", 0.5f, 2.0f) && gainIs("CD", 0.25f, 0.75f));
 }
 
 void testOpl3Parts() {
@@ -453,7 +480,7 @@ void testOpl3Parts() {
         check("OPL3 part output tests (skipped: symbols are missing)", false);
         return;
     }
-    auto partGain = [](FmPart part, float l, float r) {
+    auto partGain = [](const char* part, float l, float r) {
         return [=](Engine& e, uint32_t id) { A.SetPartGain(e.h, id, part, l, r); };
     };
     const Out refAB = opl3Note(kOutA | kOutB);
@@ -462,29 +489,29 @@ void testOpl3Parts() {
     check("OPL3: C/D are muted by default",
           zero(opl3Note(kOutC | kOutD)));
     check("OPL3: C/D with CD gain 1.0 equal the same note on A/B",
-          same(opl3Note(kOutC | kOutD, partGain(FM_PART_OPL3_CD, 1.0f, 1.0f)), refAB));
-    Out c = opl3Note(kOutC, partGain(FM_PART_OPL3_CD, 1.0f, 1.0f));
-    Out d = opl3Note(kOutD, partGain(FM_PART_OPL3_CD, 1.0f, 1.0f));
+          same(opl3Note(kOutC | kOutD, partGain("CD", 1.0f, 1.0f)), refAB));
+    Out c = opl3Note(kOutC, partGain("CD", 1.0f, 1.0f));
+    Out d = opl3Note(kOutD, partGain("CD", 1.0f, 1.0f));
     check("OPL3: output C goes to L only, D to R only",
           audible(c.l) && zero(c.r) && zero(d.l) && audible(d.r));
     check("OPL3: A-D all on with AB = CD = 1.0 doubles the A/B note",
-          scaled(opl3Note(kOutA | kOutB | kOutC | kOutD, partGain(FM_PART_OPL3_CD, 1.0f, 1.0f)),
+          scaled(opl3Note(kOutA | kOutB | kOutC | kOutD, partGain("CD", 1.0f, 1.0f)),
                  refAB, 2.0f, 2.0f));
     check("OPL3: AB gain does not reach C/D",
           same(opl3Note(kOutC | kOutD, [](Engine& e, uint32_t id) {
-                   A.SetPartGain(e.h, id, FM_PART_OPL3_AB, 0.0f, 0.0f);
-                   A.SetPartGain(e.h, id, FM_PART_OPL3_CD, 1.0f, 1.0f);
+                   A.SetPartGain(e.h, id, "AB", 0.0f, 0.0f);
+                   A.SetPartGain(e.h, id, "CD", 1.0f, 1.0f);
                }), refAB));
 
     check("OPL3: chip gain x AB gain applies to A/B",
           scaled(opl3Note(kOutA | kOutB, [](Engine& e, uint32_t id) {
                      A.SetGain(e.h, id, 0.5f, 0.25f);
-                     A.SetPartGain(e.h, id, FM_PART_OPL3_AB, 0.5f, 2.0f);
+                     A.SetPartGain(e.h, id, "AB", 0.5f, 2.0f);
                  }), refAB, 0.25f, 0.5f));
     check("OPL3: chip gain x CD gain applies to C/D",
           scaled(opl3Note(kOutC | kOutD, [](Engine& e, uint32_t id) {
                      A.SetGain(e.h, id, 0.5f, 0.25f);
-                     A.SetPartGain(e.h, id, FM_PART_OPL3_CD, 0.5f, 2.0f);
+                     A.SetPartGain(e.h, id, "CD", 0.5f, 2.0f);
                  }), refAB, 0.25f, 0.5f));
 
     {
@@ -497,7 +524,7 @@ void testOpl3Parts() {
         e.write(id, note(0, kOutC | kOutD));
         ref.render();
         Out muted = e.render();
-        A.SetPartGain(e.h, id, FM_PART_OPL3_CD, 1.0f, 1.0f);
+        A.SetPartGain(e.h, id, "CD", 1.0f, 1.0f);
         check("OPL3: C/D stay in step with A/B while CD gain is 0 and then raised",
               zero(muted) && same(e.render(), ref.render()));
     }
@@ -507,7 +534,7 @@ void testOpl3Parts() {
         Engine x;
         uint32_t cid = x.add("OPL3", 15000000);
         enableOpl3(x, cid);
-        A.SetPartGain(x.h, cid, FM_PART_OPL3_CD, cd, cd);
+        A.SetPartGain(x.h, cid, "CD", cd, cd);
         x.write(cid, note(0, c0));
         return x.render();
     };
@@ -527,7 +554,7 @@ void testOpl3Parts() {
     const Out ref4 = fourOp(kOutA | kOutB, {});
     check("OPL3: a 4-op note on C/D with CD gain 1.0 equals it on A/B",
           audible(ref4.l) && ref4.l != refAB.l &&
-          same(fourOp(kOutC | kOutD, partGain(FM_PART_OPL3_CD, 1.0f, 1.0f)), ref4));
+          same(fourOp(kOutC | kOutD, partGain("CD", 1.0f, 1.0f)), ref4));
 
     // dbopl はリズム音に C0 の出力先ビットを使わない
     auto bassDrum = [&](const std::function<void(Engine&, uint32_t)>& gains) {
@@ -544,7 +571,7 @@ void testOpl3Parts() {
     check("OPL3: rhythm ignores C0 routing and comes out of A/B",
           audible(bd.l) && bd.l == bd.r);
     check("OPL3: rhythm also comes out of C/D when CD gain is non-zero",
-          scaled(bassDrum(partGain(FM_PART_OPL3_CD, 1.0f, 1.0f)), bd, 2.0f, 2.0f));
+          scaled(bassDrum(partGain("CD", 1.0f, 1.0f)), bd, 2.0f, 2.0f));
 
     // NEW=0 の間は C0 の出力先ビットを見ず、A/B にだけ出す (ymfm と同じ)
     auto opl2Mode = [](Engine& e, uint32_t id) { A.Write(e.h, id, 0x05, 0x00, 1); };
@@ -556,8 +583,8 @@ void testOpl3Parts() {
           audible(mono.l) && mono.l == mono.r);
     Out monoCd = play("OPL3", [&](Engine& e, uint32_t id) {
         opl2Mode(e, id);
-        A.SetPartGain(e.h, id, FM_PART_OPL3_AB, 0.0f, 0.0f);
-        A.SetPartGain(e.h, id, FM_PART_OPL3_CD, 1.0f, 1.0f);
+        A.SetPartGain(e.h, id, "AB", 0.0f, 0.0f);
+        A.SetPartGain(e.h, id, "CD", 1.0f, 1.0f);
         e.write(id, note(0, kOutA | kOutB | kOutC | kOutD));
     });
     check("OPL3 with NEW=0: nothing comes out of C/D", zero(monoCd));
@@ -570,13 +597,14 @@ int main(int argc, char** argv) {
         std::printf("usage: api_test <path to DBOPLEngine library>\n");
         return 2;
     }
+    // DLL の中で落ちたときに、どの項目まで進んだかが出力に残るようにする
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     if (!loadApi(argv[1], A)) return 1;
 
     testExports();
     testChipList();
     testClock();
     testPort();
-    testMemory();
     testOpl2();
     testLevel();
     testOpl3Output();
